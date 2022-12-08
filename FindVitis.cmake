@@ -18,17 +18,13 @@
 # that should be used.
 
 if(NOT DEFINED VITIS_ROOT)
-
   find_path(VITIS_SEARCH_PATH v++
             PATHS ENV XILINX_OPENCL ENV XILINX_VITIS
             PATH_SUFFIXES bin)
   get_filename_component(VITIS_ROOT ${VITIS_SEARCH_PATH} DIRECTORY) 
   mark_as_advanced(VITIS_SEARCH_PATH)
-
 else()
-
   message(STATUS "Using user defined Vitis directory: ${VITIS_ROOT}")
-
 endif()
 
 # Check if all the necessary components are present. We want to ensure that we
@@ -229,6 +225,46 @@ function(hlslib_make_paths_absolute OUTPUT_FILES)
   set(${OUTPUT_FILES} ${_OUTPUT_FILES} PARENT_SCOPE)
 endfunction()
 
+# Function to recover the part name used by the given platform
+function(hlslib_get_part_by_platform PLATFORM_PART PLATFORM)
+  message(STATUS "Querying Vitis platform ${PLATFORM}")
+  execute_process(COMMAND ${Vitis_PLATFORMINFO} --platform ${PLATFORM} -jhardwarePlatform.board.part
+                  OUTPUT_VARIABLE _PLATFORM_PART)
+  string(STRIP "${_PLATFORM_PART}" _PLATFORM_PART)
+  if(_PLATFORM_PART)
+    set(${PLATFORM_PART} ${_PLATFORM_PART} PARENT_SCOPE)
+  else()
+    message(WARNING "Xilinx platform ${PLATFORM} was not found. Please consult \"${Vitis_PLATFORMINFO} -l\" for a list of installed platforms.")
+  endif()
+endfunction()
+
+# Function to write kernel TCL scripts
+function (write_kernel_tcl_script)
+  set(oneValueArgs DESTINATION KERNEL PART CMD)
+  set(multiValueArgs HLS_FLAGS HW_FILES TB_FILES APPEND)
+  cmake_parse_arguments(TCL "" "${oneValueArgs}" "${multiValueArgs}" ${ARGN})
+
+  set(TCL_HLS_FLAGS "-Wno-unknown-pragmas ${TCL_HLS_FLAGS}")
+  string(REPLACE ";" " " TCL_HW_FILES "${TCL_HW_FILES}")
+  string(REPLACE ";" " " TCL_TB_FILES "${TCL_TB_FILES}")
+
+  if (TCL_TB_FILES)
+    set(TCL_TB_FILES "add_files -tb -cflags \"${TCL_HLS_FLAGS}\" -csimflags \"${TCL_HLS_FLAGS}\" \"${TCL_TB_FILES}\"")
+  endif()
+
+  file(WRITE ${TCL_DESTINATION}
+    "\
+open_project ${TCL_KERNEL}\ 
+open_solution -flow_target vitis ${TCL_PART}\ 
+set_part ${TCL_PART}\ 
+add_files -cflags \"${TCL_HLS_FLAGS}\" -csimflags \"${TCL_HLS_FLAGS}\" \"${TCL_HW_FILES}\"\ 
+${TCL_TB_FILES}\ 
+set_top ${TCL_KERNEL}_top\ 
+${TCL_APPEND}\ 
+${TCL_CMD}\ 
+exit")
+endfunction()
+
 # The name of the kernel is expected to match the target name. If it does not,
 # the kernel name can be passed separately with the KERNEL keyword.
 function(add_vitis_kernel
@@ -238,8 +274,8 @@ function(add_vitis_kernel
   cmake_parse_arguments(
       KERNEL
       ""
-      "KERNEL"
-      "FILES;COMPUTE_UNITS;DEPENDS;INCLUDE_DIRS;HLS_FLAGS;HLS_CONFIG;COMPILE_FLAGS;PORT_MAPPING;SLR_MAPPING"
+      "KERNEL;VERSION;VENDOR;XO_DIR"
+      "FILES;TB_FILES;PLATFORM;COMPUTE_UNITS;DEPENDS;INCLUDE_DIRS;HLS_FLAGS;HLS_CONFIG;COMPILE_FLAGS;PORT_MAPPING;SLR_MAPPING;DISPLAY_NAME;DESCRIPTION"
       ${ARGN})
 
   # Verify that input is sane
@@ -247,6 +283,7 @@ function(add_vitis_kernel
     message(FATAL_ERROR "Must pass kernel file(s) to add_vitis_kernel using the FILES keyword.")
   endif()
   hlslib_make_paths_absolute(KERNEL_FILES ${KERNEL_FILES})
+  hlslib_make_paths_absolute(KERNEL_TB_FILES ${KERNEL_TB_FILES})
 
   # Convert non-target dependencies to absolute paths
   string(REPLACE " " ";" KERNEL_DEPENDS "${KERNEL_DEPENDS}")
@@ -257,7 +294,7 @@ function(add_vitis_kernel
     endif()
     set(_KERNEL_DEPENDS ${_KERNEL_DEPENDS} ${DEP})
   endforeach()
-  set(KERNEL_DEPENDS ${KERNEL_FILES} ${_KERNEL_DEPENDS})
+  set(KERNEL_DEPENDS ${KERNEL_FILES} ${_KERNEL_DEPENDS} ${KERNEL_TB_FILES})
 
   # Create the target that will carry properties. Adding the depends here does not actually work, so we have to store
   # them as a property, retrieve them later, and add them manually to each target
@@ -306,34 +343,6 @@ function(add_vitis_kernel
     endif()
   endforeach()
 
-  # Mandatory flags for HLS when building kernels that use hlslib
-  string(FIND "${KERNEL_HLS_FLAGS}" "-DHLSLIB_SYNTHESIS" FOUND)
-  if(FOUND EQUAL -1)
-    set(KERNEL_HLS_FLAGS "${KERNEL_HLS_FLAGS} -DHLSLIB_SYNTHESIS")
-  endif()
-  string(FIND "${KERNEL_HLS_FLAGS}" "-DHLSLIB_XILINX" FOUND)
-  if(FOUND EQUAL -1)
-    set(KERNEL_HLS_FLAGS "${KERNEL_HLS_FLAGS} -DHLSLIB_XILINX")
-  endif()
-  string(FIND "${KERNEL_HLS_FLAGS}" "-std=" FOUND)
-  if(FOUND EQUAL -1)
-    set(KERNEL_HLS_FLAGS "${KERNEL_HLS_FLAGS} -std=c++11")
-  endif()
-
-  # Pass the Vitis version to HLS
-  string(FIND "${KERNEL_HLS_FLAGS}" "-DVITIS_MAJOR_VERSION=" FOUND)
-  if(FOUND EQUAL -1)
-    set(KERNEL_HLS_FLAGS "${KERNEL_HLS_FLAGS} -DVITIS_MAJOR_VERSION=${Vitis_MAJOR_VERSION}")
-  endif()
-  string(FIND "${KERNEL_HLS_FLAGS}" "-DVITIS_MINOR_VERSION=" FOUND)
-  if(FOUND EQUAL -1)
-    set(KERNEL_HLS_FLAGS "${KERNEL_HLS_FLAGS} -DVITIS_MINOR_VERSION=${Vitis_MINOR_VERSION}")
-  endif()
-  string(FIND "${KERNEL_HLS_FLAGS}" "-DVITIS_VERSION=" FOUND)
-  if(FOUND EQUAL -1)
-    set(KERNEL_HLS_FLAGS "${KERNEL_HLS_FLAGS} -DVITIS_VERSION=${Vitis_VERSION}")
-  endif()
-
   # Add additional include directories specified
   string(REPLACE " " ";" KERNEL_INCLUDE_DIRS "${KERNEL_INCLUDE_DIRS}")
   hlslib_make_paths_absolute(KERNEL_INCLUDE_DIRS ${KERNEL_INCLUDE_DIRS})
@@ -346,10 +355,130 @@ function(add_vitis_kernel
   string(REGEX REPLACE ";|[ \t\r\n][ \t\r\n]+" " " KERNEL_HLS_FLAGS "${KERNEL_HLS_FLAGS}")
   string(STRIP "${KERNEL_HLS_FLAGS}" KERNEL_HLS_FLAGS)
 
+  # Recover the part name used by the given platform
+  if(NOT KERNEL_PLATFORM_PART)
+    hlslib_get_part_by_platform(KERNEL_PLATFORM_PART ${KERNEL_PLATFORM})
+  endif()
+
+  set(KERNEL_PROJECT_BUILD_DIR ${CMAKE_CURRENT_BINARY_DIR}/${KERNEL_NAME}/${KERNEL_PLATFORM_PART})
+
+  # C-Simulation target
+  write_kernel_tcl_script(
+    DESTINATION ${CMAKE_CURRENT_BINARY_DIR}/${KERNEL_NAME}_csim.tcl
+    KERNEL ${KERNEL_NAME}
+    PART ${KERNEL_PLATFORM_PART}
+    CMD "csim_design -clean -O -setup"
+    HLS_FLAGS ${KERNEL_HLS_FLAGS}
+    HW_FILES ${KERNEL_FILES}
+    TB_FILES ${KERNEL_TB_FILES}
+  )
+  add_custom_command(OUTPUT ${KERNEL_PROJECT_BUILD_DIR}/csim/build/csim.exe
+                    COMMENT "Running c-simulation for ${KERNEL_NAME}."
+                    COMMAND ${Vitis_HLS} -f ${CMAKE_CURRENT_BINARY_DIR}/${KERNEL_NAME}_csim.tcl
+                    DEPENDS ${KERNEL_NAME} ${KERNEL_DEPENDS})
+  add_custom_target(csim.${KERNEL_NAME} DEPENDS
+                    ${KERNEL_NAME}/${KERNEL_PLATFORM_PART}/csim/build/csim.exe)
+  set_property(TARGET csim.${KERNEL_NAME} APPEND PROPERTY ADDITIONAL_CLEAN_FILES
+               ${KERNEL_PROJECT_BUILD_DIR}/csim vitis_hls.log)
+
+  # Synthesis target
+  write_kernel_tcl_script(
+    DESTINATION ${CMAKE_CURRENT_BINARY_DIR}/${KERNEL_NAME}_synthesis.tcl
+    KERNEL ${KERNEL_NAME}
+    PART ${KERNEL_PLATFORM_PART}
+    CMD "csynth_design"
+    HLS_FLAGS ${KERNEL_HLS_FLAGS}
+    HW_FILES ${KERNEL_FILES}
+    TB_FILES ${KERNEL_TB_FILES}
+  )
+  add_custom_command(OUTPUT ${KERNEL_PROJECT_BUILD_DIR}/impl/vhdl/${KERNEL_NAME}_top.vhd
+                    COMMENT "Running c-synthesis for ${KERNEL_NAME}."
+                    COMMAND ${Vitis_HLS} -f ${CMAKE_CURRENT_BINARY_DIR}/${KERNEL_NAME}_synthesis.tcl
+                    DEPENDS ${KERNEL_NAME} ${KERNEL_DEPENDS})
+  add_custom_target(synth.${KERNEL_NAME} DEPENDS
+                    ${KERNEL_PROJECT_BUILD_DIR}/impl/vhdl/${KERNEL_NAME}_top.vhd)
+  set_property(TARGET synth.${KERNEL_NAME} APPEND PROPERTY ADDITIONAL_CLEAN_FILES
+              ${KERNEL_PROJECT_BUILD_DIR}/syn
+              ${KERNEL_PROJECT_BUILD_DIR}/impl vitis_hls.log)
+
+  # Co-simulation target
+  write_kernel_tcl_script(
+    DESTINATION ${CMAKE_CURRENT_BINARY_DIR}/${KERNEL_NAME}_cosim.tcl
+    KERNEL ${KERNEL_NAME}
+    PART ${KERNEL_PLATFORM_PART}
+    CMD "cosim_design -trace_level all -O"
+    HLS_FLAGS ${KERNEL_HLS_FLAGS}
+    HW_FILES ${KERNEL_FILES}
+    TB_FILES ${KERNEL_TB_FILES}
+  )
+  add_custom_command(OUTPUT ${KERNEL_PROJECT_BUILD_DIR}/sim/verilog/${KERNEL_NAME}_top.v
+                    COMMENT "Running co-simulation for ${KERNEL_NAME}."
+                    COMMAND ${Vitis_HLS} -f ${CMAKE_CURRENT_BINARY_DIR}/${KERNEL_NAME}_cosim.tcl
+                    DEPENDS ${KERNEL_NAME} ${KERNEL_DEPENDS})
+  add_custom_target(cosim.${KERNEL_NAME} DEPENDS 
+                    synth.${KERNEL_NAME}
+                    ${KERNEL_PROJECT_BUILD_DIR}/sim/verilog/${KERNEL_NAME}_top.v)
+  set_property(TARGET cosim.${KERNEL_NAME} APPEND PROPERTY ADDITIONAL_CLEAN_FILES
+              ${KERNEL_PROJECT_BUILD_DIR}/sim vitis_hls.log)
+
+  # Export IP target
+  write_kernel_tcl_script(
+    DESTINATION ${CMAKE_CURRENT_BINARY_DIR}/${KERNEL_NAME}_xo.tcl
+    KERNEL ${KERNEL_NAME}
+    PART ${KERNEL_PLATFORM_PART}
+    CMD "export_design \
+  -format xo \
+  -display_name \"${KERNEL_DISPLAY_NAME}\" \
+  -description \"${KERNEL_DESCRIPTION}\" \
+  -vendor \"${KERNEL_VENDOR}\" \
+  -ipname \"${KERNEL_NAME}\" \
+  -version \"${KERNEL_VERSION}\" \
+  -output \"${KERNEL_XO_DIR}/${KERNEL_NAME}.xo\""
+    HLS_FLAGS ${KERNEL_HLS_FLAGS}
+    HW_FILES ${KERNEL_FILES}
+    TB_FILES ${KERNEL_TB_FILES}
+  )
+  add_custom_command(OUTPUT ${KERNEL_XO_DIR}/${KERNEL_NAME}.xo
+                    COMMENT "Exporting design for ${KERNEL_NAME}."
+                    COMMAND ${Vitis_HLS} -f ${CMAKE_CURRENT_BINARY_DIR}/${KERNEL_NAME}_xo.tcl
+                    DEPENDS ${KERNEL_NAME} ${KERNEL_DEPENDS})
+  add_custom_target(xo.${KERNEL_NAME} DEPENDS
+                    synth.${KERNEL_NAME}
+                    ${KERNEL_XO_DIR}/${KERNEL_NAME}.xo)
+  set_property(TARGET xo.${KERNEL_NAME} APPEND PROPERTY ADDITIONAL_CLEAN_FILES
+              ${KERNEL_PROJECT_BUILD_DIR}/syn vitis_hls.log)
+
+  # Handy targets (csim, cosim, )
+  # csim
+  # if (NOT TARGET csim)
+  #   add_custom_target(csim
+  #                     COMMENT "Running c-simulation for Vitis kernels.")
+  # endif()
+  # add_dependencies(csim csim.${KERNEL_NAME})
+  # synth
+  if (NOT TARGET synth)
+    add_custom_target(synth
+                      COMMENT "Running synthesis for Vitis kernels.")
+  endif()
+  add_dependencies(synth synth.${KERNEL_NAME})
+  # cosim
+  if (NOT TARGET cosim)
+    add_custom_target(cosim
+                      COMMENT "Running co-simulation for Vitis kernels.")
+  endif()
+  add_dependencies(cosim cosim.${KERNEL_NAME})
+  # xo
+  if (NOT TARGET xo)
+    add_custom_target(xo
+                      COMMENT "Exporting design for Vitis kernels.")
+  endif()
+  add_dependencies(xo xo.${KERNEL_NAME})
+
   # Pass variables the program target through properties
   set_target_properties(${KERNEL_TARGET} PROPERTIES KERNEL_FILES "${KERNEL_FILES}")
   set_target_properties(${KERNEL_TARGET} PROPERTIES KERNEL_COMPUTE_UNITS "${KERNEL_COMPUTE_UNITS}")
   set_target_properties(${KERNEL_TARGET} PROPERTIES KERNEL_NAME "${KERNEL_NAME}")
+  set_target_properties(${KERNEL_TARGET} PROPERTIES KERNEL_TB_FILES "${KERNEL_TB_FILES}")
   set_target_properties(${KERNEL_TARGET} PROPERTIES HLS_FLAGS "${KERNEL_HLS_FLAGS}")
   set_target_properties(${KERNEL_TARGET} PROPERTIES COMPILE_FLAGS "${KERNEL_COMPILE_FLAGS}")
   set_target_properties(${KERNEL_TARGET} PROPERTIES LINK_FLAGS "${KERNEL_LINK_FLAGS}")
@@ -399,17 +528,9 @@ function(add_vitis_program
 
   # Recover the part name used by the given platform
   if(NOT PROGRAM_PLATFORM_PART OR NOT "${${PROGRAM_TARGET}_PLATFORM}" STREQUAL "${PROGRAM_PLATFORM}")
-    message(STATUS "Querying Vitis platform for ${PROGRAM_TARGET}.")
-    execute_process(COMMAND ${Vitis_PLATFORMINFO} --platform ${PROGRAM_PLATFORM} -jhardwarePlatform.board.part
-                    OUTPUT_VARIABLE PLATFORM_PART)
-    string(STRIP "${PLATFORM_PART}" PLATFORM_PART)
-    if(PLATFORM_PART)
-      set(PROGRAM_PLATFORM_PART ${PLATFORM_PART} CACHE INTERNAL "")
-    endif()
+    hlslib_get_part_by_platform(PROGRAM_PLATFORM ${PROGRAM_PLATFORM_PART})
   endif()
-  if(NOT PROGRAM_PLATFORM_PART)
-    message(WARNING "Xilinx platform ${PROGRAM_PLATFORM} was not found. Please consult \"${Vitis_PLATFORMINFO} -l\" for a list of installed platforms.")
-  else()
+  if(PROGRAM_PLATFORM_PART AND NOT "${${PROGRAM_TARGET}_PLATFORM}")
     # Cache this so we don't have to rerun platforminfo if the platform didn't change
     set(${PROGRAM_TARGET}_PLATFORM ${PROGRAM_PLATFORM} CACHE INTERNAL "")
   endif()
@@ -738,7 +859,7 @@ set(Vitis_EXPORTS
     Vitis_PLATFORMINFO)
 mark_as_advanced(Vitis_EXPORTS)
 
-include(FindPackageHandleStandardArgs)
-# Handle the QUIETLY and REQUIRED arguments and set Vitis_FOUND to TRUE if all
-# listed variables were found.
-find_package_handle_standard_args(Vitis DEFAULT_MSG ${Vitis_EXPORTS})
+# include(FindPackageHandleStandardArgs)
+# # Handle the QUIETLY and REQUIRED arguments and set Vitis_FOUND to TRUE if all
+# # listed variables were found.
+# find_package_handle_standard_args(Vitis DEFAULT_MSG ${Vitis_EXPORTS})
