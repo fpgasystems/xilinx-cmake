@@ -80,7 +80,6 @@ endif()
 set(Vitis_USE_XRT ${VITIS_USE_XRT} CACHE STRING "Use XRT as runtime. Otherwise, use Vitis OpenCL runtime." FORCE)
 
 # Currently only x86 support
-
 if(CMAKE_SYSTEM_PROCESSOR MATCHES "(x86)|(X86)|(amd64)|(AMD64)")
 
   #----------------------------------------------------------------------------
@@ -203,9 +202,7 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "(x86)|(X86)|(amd64)|(AMD64)")
   endif()
 
 else()
-
   message(WARNING "Unsupported architecture: ${CMAKE_SYSTEM_PROCESSOR}")
-
 endif()
 
 # Function to convert each path in a list to an absolute path, if it isn't already
@@ -238,9 +235,9 @@ function(hlslib_get_part_by_platform PLATFORM_PART PLATFORM)
   endif()
 endfunction()
 
-# Function to write kernel TCL scripts
-function (write_kernel_tcl_script)
-  set(oneValueArgs DESTINATION KERNEL PART CMD)
+# Function to write ip TCL scripts
+function (write_ip_tcl_script)
+  set(oneValueArgs DESTINATION IP PART CMD)
   set(multiValueArgs HLS_FLAGS HW_FILES TB_FILES APPEND)
   cmake_parse_arguments(TCL "" "${oneValueArgs}" "${multiValueArgs}" ${ARGN})
 
@@ -254,15 +251,204 @@ function (write_kernel_tcl_script)
 
   file(WRITE ${TCL_DESTINATION}
     "\
-open_project ${TCL_KERNEL}\ 
+open_project ${TCL_IP}\ 
 open_solution -flow_target vitis ${TCL_PART}\ 
 set_part ${TCL_PART}\ 
 add_files -cflags \"${TCL_HLS_FLAGS}\" -csimflags \"${TCL_HLS_FLAGS}\" \"${TCL_HW_FILES}\"\ 
 ${TCL_TB_FILES}\ 
-set_top ${TCL_KERNEL}_top\ 
+set_top ${TCL_IP}\ 
 ${TCL_APPEND}\ 
 ${TCL_CMD}\ 
 exit")
+endfunction()
+
+# Used for building IPs that can be later used by kernels
+function(add_vitis_ip
+         IP_TARGET)
+
+  # Keyword arguments
+  cmake_parse_arguments(
+      IP
+      ""
+      "IP;VERSION;VENDOR;IP_DIR"
+      "FILES;TB_FILES;PLATFORM;DEPENDS;INCLUDE_DIRS;HLS_FLAGS;HLS_CONFIG;COMPILE_FLAGS;DISPLAY_NAME;DESCRIPTION"
+      ${ARGN})
+
+  # Verify that input is sane
+  if(NOT IP_FILES)
+    message(FATAL_ERROR "Must pass IP file(s) to add_vitis_ip using the FILES keyword.")
+  endif()
+  hlslib_make_paths_absolute(IP_FILES ${IP_FILES})
+  hlslib_make_paths_absolute(IP_TB_FILES ${IP_TB_FILES})
+
+  # Convert non-target dependencies to absolute paths
+  string(REPLACE " " ";" IP_DEPENDS "${IP_DEPENDS}")
+  unset(_IP_DEPENDS)
+  foreach(DEP ${IP_DEPENDS})
+    if(NOT TARGET ${DEP}) 
+      hlslib_make_paths_absolute(DEP ${DEP})
+    endif()
+    set(_IP_DEPENDS ${_IP_DEPENDS} ${DEP})
+  endforeach()
+  set(IP_DEPENDS ${IP_FILES} ${_IP_DEPENDS} ${IP_TB_FILES})
+
+  # Create the target that will carry properties. Adding the depends here does not actually work, so we have to store
+  # them as a property, retrieve them later, and add them manually to each target
+  add_custom_target(${IP_TARGET} DEPENDS ${IP_DEPENDS})
+
+  # Use the target name as the IP name if the IP name hasn't been explicitly passed
+  if(DEFINED IP_IP)
+    set(IP_NAME ${IP_IP})
+  else()
+    set(IP_NAME ${IP_TARGET})
+  endif()
+
+  # Add additional include directories specified
+  string(REPLACE " " ";" IP_INCLUDE_DIRS "${IP_INCLUDE_DIRS}")
+  hlslib_make_paths_absolute(IP_INCLUDE_DIRS ${IP_INCLUDE_DIRS})
+  foreach(INCLUDE_DIR ${IP_INCLUDE_DIRS})
+    set(IP_HLS_FLAGS "${IP_HLS_FLAGS} -I${INCLUDE_DIR}")
+  endforeach()
+
+  # Clean up HLS flags to make sure they use string syntax (not list syntax),
+  # and that there are no superfluous spaces.
+  string(REGEX REPLACE ";|[ \t\r\n][ \t\r\n]+" " " IP_HLS_FLAGS "${IP_HLS_FLAGS}")
+  string(STRIP "${IP_HLS_FLAGS}" IP_HLS_FLAGS)
+
+  # Recover the part name used by the given platform
+  if(NOT IP_PLATFORM_PART)
+    hlslib_get_part_by_platform(IP_PLATFORM_PART ${IP_PLATFORM})
+  endif()
+
+  set(IP_PROJECT_BUILD_DIR ${CMAKE_CURRENT_BINARY_DIR}/${IP_NAME}/${IP_PLATFORM_PART})
+
+  # C-Simulation target
+  write_ip_tcl_script(
+    DESTINATION ${CMAKE_CURRENT_BINARY_DIR}/${IP_NAME}_csim.tcl
+    IP ${IP_NAME}
+    PART ${IP_PLATFORM_PART}
+    CMD "csim_design -clean -O -setup"
+    HLS_FLAGS ${IP_HLS_FLAGS}
+    HW_FILES ${IP_FILES}
+    TB_FILES ${IP_TB_FILES}
+  )
+  add_custom_command(OUTPUT ${IP_PROJECT_BUILD_DIR}/csim/build/csim.exe
+                    COMMENT "Running c-simulation for ${IP_NAME}."
+                    COMMAND ${Vitis_HLS} -f ${CMAKE_CURRENT_BINARY_DIR}/${IP_NAME}_csim.tcl
+                    DEPENDS ${IP_NAME} ${IP_DEPENDS})
+  add_custom_target(csim.${IP_NAME} DEPENDS
+                    ${IP_NAME}/${IP_PLATFORM_PART}/csim/build/csim.exe)
+  set_property(TARGET csim.${IP_NAME} APPEND PROPERTY ADDITIONAL_CLEAN_FILES
+               ${IP_PROJECT_BUILD_DIR}/csim vitis_hls.log)
+
+  # Synthesis target
+  write_ip_tcl_script(
+    DESTINATION ${CMAKE_CURRENT_BINARY_DIR}/${IP_NAME}_synthesis.tcl
+    IP ${IP_NAME}
+    PART ${IP_PLATFORM_PART}
+    CMD "csynth_design"
+    HLS_FLAGS ${IP_HLS_FLAGS}
+    HW_FILES ${IP_FILES}
+    TB_FILES ${IP_TB_FILES}
+  )
+  add_custom_command(OUTPUT ${IP_PROJECT_BUILD_DIR}/impl/vhdl/${IP_NAME}.vhd
+                    COMMENT "Running c-synthesis for ${IP_NAME}."
+                    COMMAND ${Vitis_HLS} -f ${CMAKE_CURRENT_BINARY_DIR}/${IP_NAME}_synthesis.tcl
+                    DEPENDS ${IP_NAME} ${IP_DEPENDS})
+  add_custom_target(synth.${IP_NAME} DEPENDS
+                    ${IP_PROJECT_BUILD_DIR}/impl/vhdl/${IP_NAME}.vhd)
+  set_property(TARGET synth.${IP_NAME} APPEND PROPERTY ADDITIONAL_CLEAN_FILES
+              ${IP_PROJECT_BUILD_DIR}/syn
+              ${IP_PROJECT_BUILD_DIR}/impl vitis_hls.log)
+
+  # Co-simulation target
+  write_ip_tcl_script(
+    DESTINATION ${CMAKE_CURRENT_BINARY_DIR}/${IP_NAME}_cosim.tcl
+    IP ${IP_NAME}
+    PART ${IP_PLATFORM_PART}
+    CMD "cosim_design -trace_level all -O"
+    HLS_FLAGS ${IP_HLS_FLAGS}
+    HW_FILES ${IP_FILES}
+    TB_FILES ${IP_TB_FILES}
+  )
+  add_custom_command(OUTPUT ${IP_PROJECT_BUILD_DIR}/sim/verilog/${IP_NAME}.v
+                    COMMENT "Running co-simulation for ${IP_NAME}."
+                    COMMAND ${Vitis_HLS} -f ${CMAKE_CURRENT_BINARY_DIR}/${IP_NAME}_cosim.tcl
+                    DEPENDS ${IP_NAME} ${IP_DEPENDS})
+  add_custom_target(cosim.${IP_NAME} DEPENDS 
+                    synth.${IP_NAME}
+                    ${IP_PROJECT_BUILD_DIR}/sim/verilog/${IP_NAME}.v)
+  set_property(TARGET cosim.${IP_NAME} APPEND PROPERTY ADDITIONAL_CLEAN_FILES
+              ${IP_PROJECT_BUILD_DIR}/sim vitis_hls.log)
+
+  # Export IP target
+  write_ip_tcl_script(
+    DESTINATION ${CMAKE_CURRENT_BINARY_DIR}/${IP_NAME}_ip.tcl
+    IP ${IP_NAME}
+    PART ${IP_PLATFORM_PART}
+    CMD "export_design \
+  -format ip_catalog \
+  -display_name \"${IP_DISPLAY_NAME}\" \
+  -description \"${IP_DESCRIPTION}\" \
+  -vendor \"${IP_VENDOR}\" \
+  -ipname \"${IP_NAME}\" \
+  -version \"${IP_VERSION}\" \
+  -output \"${IP_IP_DIR}/${IP_NAME}.zip\""
+    HLS_FLAGS ${IP_HLS_FLAGS}
+    HW_FILES ${IP_FILES}
+    TB_FILES ${IP_TB_FILES}
+  )
+  add_custom_command(OUTPUT ${IP_IP_DIR}/${IP_NAME}.zip
+                    COMMENT "Exporting design for ${IP_NAME}."
+                    COMMAND ${Vitis_HLS} -f ${CMAKE_CURRENT_BINARY_DIR}/${IP_NAME}_ip.tcl
+                    DEPENDS ${IP_NAME} ${IP_DEPENDS})
+  add_custom_command(OUTPUT ${IP_IP_DIR}/${IP_NAME}/component.xml 
+                    COMMENT "Extracting IP for ${IP_NAME}."
+                    COMMAND unzip -qo ${IP_IP_DIR}/${IP_NAME}.zip -d ${IP_IP_DIR}/${IP_NAME}
+                    DEPENDS ${IP_IP_DIR}/${IP_NAME}.zip)
+  add_custom_target(ip.${IP_NAME} DEPENDS
+                    synth.${IP_NAME}
+                    ${IP_IP_DIR}/${IP_NAME}/component.xml)
+  set_property(TARGET ip.${IP_NAME} APPEND PROPERTY ADDITIONAL_CLEAN_FILES
+              ${IP_PROJECT_BUILD_DIR}/syn vitis_hls.log)
+
+  # Handy targets (csim, cosim, )
+  # csim
+  # if (NOT TARGET csim)
+  #   add_custom_target(csim
+  #                     COMMENT "Running c-simulation for Vitis IPs.")
+  # endif()
+  # add_dependencies(csim csim.${IP_NAME})
+  # synth
+  if (NOT TARGET synth)
+    add_custom_target(synth
+                      COMMENT "Running synthesis for Vitis IPs.")
+  endif()
+  add_dependencies(synth synth.${IP_NAME})
+  # cosim
+  if (NOT TARGET cosim)
+    add_custom_target(cosim
+                      COMMENT "Running co-simulation for Vitis IPs.")
+  endif()
+  add_dependencies(cosim cosim.${IP_NAME})
+  # ip
+  if (NOT TARGET ip)
+    add_custom_target(ip
+                      COMMENT "Exporting design for Vitis IPs.")
+  endif()
+  add_dependencies(ip ip.${IP_NAME})
+
+  # Pass variables the program target through properties
+  set_target_properties(${IP_TARGET} PROPERTIES IP_FILES "${IP_FILES}")
+  set_target_properties(${IP_TARGET} PROPERTIES IP_COMPUTE_UNITS "${IP_COMPUTE_UNITS}")
+  set_target_properties(${IP_TARGET} PROPERTIES IP_NAME "${IP_NAME}")
+  set_target_properties(${IP_TARGET} PROPERTIES IP_TB_FILES "${IP_TB_FILES}")
+  set_target_properties(${IP_TARGET} PROPERTIES HLS_FLAGS "${IP_HLS_FLAGS}")
+  set_target_properties(${IP_TARGET} PROPERTIES COMPILE_FLAGS "${IP_COMPILE_FLAGS}")
+  set_target_properties(${IP_TARGET} PROPERTIES LINK_FLAGS "${IP_LINK_FLAGS}")
+  set_target_properties(${IP_TARGET} PROPERTIES HLS_CONFIG "${IP_HLS_CONFIG}")
+  set_target_properties(${IP_TARGET} PROPERTIES DEPENDS "${IP_DEPENDS}")
+
 endfunction()
 
 # The name of the kernel is expected to match the target name. If it does not,
@@ -274,8 +460,8 @@ function(add_vitis_kernel
   cmake_parse_arguments(
       KERNEL
       ""
-      "KERNEL;VERSION;VENDOR;XO_DIR"
-      "FILES;TB_FILES;PLATFORM;COMPUTE_UNITS;DEPENDS;INCLUDE_DIRS;HLS_FLAGS;HLS_CONFIG;COMPILE_FLAGS;PORT_MAPPING;SLR_MAPPING;DISPLAY_NAME;DESCRIPTION"
+      "KERNEL"
+      "FILES;COMPUTE_UNITS;IPS;DEPENDS;INCLUDE_DIRS;HLS_FLAGS;HLS_CONFIG;COMPILE_FLAGS;PORT_MAPPING;SLR_MAPPING"
       ${ARGN})
 
   # Verify that input is sane
@@ -283,7 +469,6 @@ function(add_vitis_kernel
     message(FATAL_ERROR "Must pass kernel file(s) to add_vitis_kernel using the FILES keyword.")
   endif()
   hlslib_make_paths_absolute(KERNEL_FILES ${KERNEL_FILES})
-  hlslib_make_paths_absolute(KERNEL_TB_FILES ${KERNEL_TB_FILES})
 
   # Convert non-target dependencies to absolute paths
   string(REPLACE " " ";" KERNEL_DEPENDS "${KERNEL_DEPENDS}")
@@ -294,7 +479,7 @@ function(add_vitis_kernel
     endif()
     set(_KERNEL_DEPENDS ${_KERNEL_DEPENDS} ${DEP})
   endforeach()
-  set(KERNEL_DEPENDS ${KERNEL_FILES} ${_KERNEL_DEPENDS} ${KERNEL_TB_FILES})
+  set(KERNEL_DEPENDS ${KERNEL_FILES} ${_KERNEL_DEPENDS})
 
   # Create the target that will carry properties. Adding the depends here does not actually work, so we have to store
   # them as a property, retrieve them later, and add them manually to each target
@@ -343,6 +528,41 @@ function(add_vitis_kernel
     endif()
   endforeach()
 
+  # Mandatory flags for HLS when building kernels that use hlslib
+  string(FIND "${KERNEL_HLS_FLAGS}" "-DHLSLIB_SYNTHESIS" FOUND)
+  if(FOUND EQUAL -1)
+    set(KERNEL_HLS_FLAGS "${KERNEL_HLS_FLAGS} -DHLSLIB_SYNTHESIS")
+  endif()
+  string(FIND "${KERNEL_HLS_FLAGS}" "-DHLSLIB_XILINX" FOUND)
+  if(FOUND EQUAL -1)
+    set(KERNEL_HLS_FLAGS "${KERNEL_HLS_FLAGS} -DHLSLIB_XILINX")
+  endif()
+  string(FIND "${KERNEL_HLS_FLAGS}" "-std=" FOUND)
+  if(FOUND EQUAL -1)
+    set(KERNEL_HLS_FLAGS "${KERNEL_HLS_FLAGS} -std=c++11")
+  endif()
+
+  # Pass the Vitis version to HLS
+  string(FIND "${KERNEL_HLS_FLAGS}" "-DVITIS_MAJOR_VERSION=" FOUND)
+  if(FOUND EQUAL -1)
+    set(KERNEL_HLS_FLAGS "${KERNEL_HLS_FLAGS} -DVITIS_MAJOR_VERSION=${Vitis_MAJOR_VERSION}")
+  endif()
+  string(FIND "${KERNEL_HLS_FLAGS}" "-DVITIS_MINOR_VERSION=" FOUND)
+  if(FOUND EQUAL -1)
+    set(KERNEL_HLS_FLAGS "${KERNEL_HLS_FLAGS} -DVITIS_MINOR_VERSION=${Vitis_MINOR_VERSION}")
+  endif()
+  string(FIND "${KERNEL_HLS_FLAGS}" "-DVITIS_VERSION=" FOUND)
+  if(FOUND EQUAL -1)
+    set(KERNEL_HLS_FLAGS "${KERNEL_HLS_FLAGS} -DVITIS_VERSION=${Vitis_VERSION}")
+  endif()
+
+  # Tell hlslib whether we're using Vitis HLS or Vivado HLS
+  if(NOT Vitis_USE_VITIS_HLS)
+    set(KERNEL_HLS_FLAGS "${KERNEL_HLS_FLAGS} -D__VIVADO_HLS__")
+  else()
+    set(KERNEL_HLS_FLAGS "${KERNEL_HLS_FLAGS} -D__VITIS_HLS__")
+  endif()
+
   # Add additional include directories specified
   string(REPLACE " " ";" KERNEL_INCLUDE_DIRS "${KERNEL_INCLUDE_DIRS}")
   hlslib_make_paths_absolute(KERNEL_INCLUDE_DIRS ${KERNEL_INCLUDE_DIRS})
@@ -355,130 +575,10 @@ function(add_vitis_kernel
   string(REGEX REPLACE ";|[ \t\r\n][ \t\r\n]+" " " KERNEL_HLS_FLAGS "${KERNEL_HLS_FLAGS}")
   string(STRIP "${KERNEL_HLS_FLAGS}" KERNEL_HLS_FLAGS)
 
-  # Recover the part name used by the given platform
-  if(NOT KERNEL_PLATFORM_PART)
-    hlslib_get_part_by_platform(KERNEL_PLATFORM_PART ${KERNEL_PLATFORM})
-  endif()
-
-  set(KERNEL_PROJECT_BUILD_DIR ${CMAKE_CURRENT_BINARY_DIR}/${KERNEL_NAME}/${KERNEL_PLATFORM_PART})
-
-  # C-Simulation target
-  write_kernel_tcl_script(
-    DESTINATION ${CMAKE_CURRENT_BINARY_DIR}/${KERNEL_NAME}_csim.tcl
-    KERNEL ${KERNEL_NAME}
-    PART ${KERNEL_PLATFORM_PART}
-    CMD "csim_design -clean -O -setup"
-    HLS_FLAGS ${KERNEL_HLS_FLAGS}
-    HW_FILES ${KERNEL_FILES}
-    TB_FILES ${KERNEL_TB_FILES}
-  )
-  add_custom_command(OUTPUT ${KERNEL_PROJECT_BUILD_DIR}/csim/build/csim.exe
-                    COMMENT "Running c-simulation for ${KERNEL_NAME}."
-                    COMMAND ${Vitis_HLS} -f ${CMAKE_CURRENT_BINARY_DIR}/${KERNEL_NAME}_csim.tcl
-                    DEPENDS ${KERNEL_NAME} ${KERNEL_DEPENDS})
-  add_custom_target(csim.${KERNEL_NAME} DEPENDS
-                    ${KERNEL_NAME}/${KERNEL_PLATFORM_PART}/csim/build/csim.exe)
-  set_property(TARGET csim.${KERNEL_NAME} APPEND PROPERTY ADDITIONAL_CLEAN_FILES
-               ${KERNEL_PROJECT_BUILD_DIR}/csim vitis_hls.log)
-
-  # Synthesis target
-  write_kernel_tcl_script(
-    DESTINATION ${CMAKE_CURRENT_BINARY_DIR}/${KERNEL_NAME}_synthesis.tcl
-    KERNEL ${KERNEL_NAME}
-    PART ${KERNEL_PLATFORM_PART}
-    CMD "csynth_design"
-    HLS_FLAGS ${KERNEL_HLS_FLAGS}
-    HW_FILES ${KERNEL_FILES}
-    TB_FILES ${KERNEL_TB_FILES}
-  )
-  add_custom_command(OUTPUT ${KERNEL_PROJECT_BUILD_DIR}/impl/vhdl/${KERNEL_NAME}_top.vhd
-                    COMMENT "Running c-synthesis for ${KERNEL_NAME}."
-                    COMMAND ${Vitis_HLS} -f ${CMAKE_CURRENT_BINARY_DIR}/${KERNEL_NAME}_synthesis.tcl
-                    DEPENDS ${KERNEL_NAME} ${KERNEL_DEPENDS})
-  add_custom_target(synth.${KERNEL_NAME} DEPENDS
-                    ${KERNEL_PROJECT_BUILD_DIR}/impl/vhdl/${KERNEL_NAME}_top.vhd)
-  set_property(TARGET synth.${KERNEL_NAME} APPEND PROPERTY ADDITIONAL_CLEAN_FILES
-              ${KERNEL_PROJECT_BUILD_DIR}/syn
-              ${KERNEL_PROJECT_BUILD_DIR}/impl vitis_hls.log)
-
-  # Co-simulation target
-  write_kernel_tcl_script(
-    DESTINATION ${CMAKE_CURRENT_BINARY_DIR}/${KERNEL_NAME}_cosim.tcl
-    KERNEL ${KERNEL_NAME}
-    PART ${KERNEL_PLATFORM_PART}
-    CMD "cosim_design -trace_level all -O"
-    HLS_FLAGS ${KERNEL_HLS_FLAGS}
-    HW_FILES ${KERNEL_FILES}
-    TB_FILES ${KERNEL_TB_FILES}
-  )
-  add_custom_command(OUTPUT ${KERNEL_PROJECT_BUILD_DIR}/sim/verilog/${KERNEL_NAME}_top.v
-                    COMMENT "Running co-simulation for ${KERNEL_NAME}."
-                    COMMAND ${Vitis_HLS} -f ${CMAKE_CURRENT_BINARY_DIR}/${KERNEL_NAME}_cosim.tcl
-                    DEPENDS ${KERNEL_NAME} ${KERNEL_DEPENDS})
-  add_custom_target(cosim.${KERNEL_NAME} DEPENDS 
-                    synth.${KERNEL_NAME}
-                    ${KERNEL_PROJECT_BUILD_DIR}/sim/verilog/${KERNEL_NAME}_top.v)
-  set_property(TARGET cosim.${KERNEL_NAME} APPEND PROPERTY ADDITIONAL_CLEAN_FILES
-              ${KERNEL_PROJECT_BUILD_DIR}/sim vitis_hls.log)
-
-  # Export IP target
-  write_kernel_tcl_script(
-    DESTINATION ${CMAKE_CURRENT_BINARY_DIR}/${KERNEL_NAME}_xo.tcl
-    KERNEL ${KERNEL_NAME}
-    PART ${KERNEL_PLATFORM_PART}
-    CMD "export_design \
-  -format xo \
-  -display_name \"${KERNEL_DISPLAY_NAME}\" \
-  -description \"${KERNEL_DESCRIPTION}\" \
-  -vendor \"${KERNEL_VENDOR}\" \
-  -ipname \"${KERNEL_NAME}\" \
-  -version \"${KERNEL_VERSION}\" \
-  -output \"${KERNEL_XO_DIR}/${KERNEL_NAME}.xo\""
-    HLS_FLAGS ${KERNEL_HLS_FLAGS}
-    HW_FILES ${KERNEL_FILES}
-    TB_FILES ${KERNEL_TB_FILES}
-  )
-  add_custom_command(OUTPUT ${KERNEL_XO_DIR}/${KERNEL_NAME}.xo
-                    COMMENT "Exporting design for ${KERNEL_NAME}."
-                    COMMAND ${Vitis_HLS} -f ${CMAKE_CURRENT_BINARY_DIR}/${KERNEL_NAME}_xo.tcl
-                    DEPENDS ${KERNEL_NAME} ${KERNEL_DEPENDS})
-  add_custom_target(xo.${KERNEL_NAME} DEPENDS
-                    synth.${KERNEL_NAME}
-                    ${KERNEL_XO_DIR}/${KERNEL_NAME}.xo)
-  set_property(TARGET xo.${KERNEL_NAME} APPEND PROPERTY ADDITIONAL_CLEAN_FILES
-              ${KERNEL_PROJECT_BUILD_DIR}/syn vitis_hls.log)
-
-  # Handy targets (csim, cosim, )
-  # csim
-  # if (NOT TARGET csim)
-  #   add_custom_target(csim
-  #                     COMMENT "Running c-simulation for Vitis kernels.")
-  # endif()
-  # add_dependencies(csim csim.${KERNEL_NAME})
-  # synth
-  if (NOT TARGET synth)
-    add_custom_target(synth
-                      COMMENT "Running synthesis for Vitis kernels.")
-  endif()
-  add_dependencies(synth synth.${KERNEL_NAME})
-  # cosim
-  if (NOT TARGET cosim)
-    add_custom_target(cosim
-                      COMMENT "Running co-simulation for Vitis kernels.")
-  endif()
-  add_dependencies(cosim cosim.${KERNEL_NAME})
-  # xo
-  if (NOT TARGET xo)
-    add_custom_target(xo
-                      COMMENT "Exporting design for Vitis kernels.")
-  endif()
-  add_dependencies(xo xo.${KERNEL_NAME})
-
   # Pass variables the program target through properties
   set_target_properties(${KERNEL_TARGET} PROPERTIES KERNEL_FILES "${KERNEL_FILES}")
   set_target_properties(${KERNEL_TARGET} PROPERTIES KERNEL_COMPUTE_UNITS "${KERNEL_COMPUTE_UNITS}")
   set_target_properties(${KERNEL_TARGET} PROPERTIES KERNEL_NAME "${KERNEL_NAME}")
-  set_target_properties(${KERNEL_TARGET} PROPERTIES KERNEL_TB_FILES "${KERNEL_TB_FILES}")
   set_target_properties(${KERNEL_TARGET} PROPERTIES HLS_FLAGS "${KERNEL_HLS_FLAGS}")
   set_target_properties(${KERNEL_TARGET} PROPERTIES COMPILE_FLAGS "${KERNEL_COMPILE_FLAGS}")
   set_target_properties(${KERNEL_TARGET} PROPERTIES LINK_FLAGS "${KERNEL_LINK_FLAGS}")
