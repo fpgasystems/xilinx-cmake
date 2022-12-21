@@ -139,7 +139,7 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "(x86)|(X86)|(amd64)|(AMD64)")
                       /opt/xilinx/xrt /opt/Xilinx/xrt
                       /tools/Xilinx/xrt /tools/xilinx/xrt
                 PATH_SUFFIXES lib)
-      get_filename_component(XRT_ROOT ${XRT_SEARCH_PATH} DIRECTORY) 
+      get_filename_component(XRT_ROOT ${XRT_SEARCH_PATH} DIRECTORY CACHE) 
       mark_as_advanced(XRT_SEARCH_PATH)
 
       if(NOT XRT_SEARCH_PATH)
@@ -147,10 +147,6 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "(x86)|(X86)|(amd64)|(AMD64)")
       endif()
 
       message(STATUS "Found Xilinx Runtime (XRT): ${XRT_ROOT}")
-
-    else() 
-
-      message(STATUS "Using user defined Xilinx Runtime (XRT) directory \"${XRT_ROOT}\".")
 
     endif()
 
@@ -252,7 +248,7 @@ function (write_ip_tcl_script)
   file(WRITE ${TCL_DESTINATION}
     "\
 open_project ${TCL_IP}\ 
-open_solution -flow_target vitis ${TCL_PART}\ 
+open_solution ${TCL_PART}\ 
 set_part ${TCL_PART}\ 
 add_files -cflags \"${TCL_HLS_FLAGS}\" -csimflags \"${TCL_HLS_FLAGS}\" \"${TCL_HW_FILES}\"\ 
 ${TCL_TB_FILES}\ 
@@ -270,8 +266,8 @@ function(add_vitis_ip
   cmake_parse_arguments(
       IP
       ""
-      "IP;VERSION;VENDOR;IP_DIR"
-      "FILES;TB_FILES;PLATFORM;DEPENDS;INCLUDE_DIRS;HLS_FLAGS;HLS_CONFIG;COMPILE_FLAGS;DISPLAY_NAME;DESCRIPTION"
+      "IP;VERSION;VENDOR;IP_DIR;PLATFORM_PART"
+      "FILES;TB_FILES;DEPENDS;INCLUDE_DIRS;HLS_FLAGS;HLS_CONFIG;COMPILE_FLAGS;DISPLAY_NAME;DESCRIPTION"
       ${ARGN})
 
   # Verify that input is sane
@@ -314,11 +310,6 @@ function(add_vitis_ip
   # and that there are no superfluous spaces.
   string(REGEX REPLACE ";|[ \t\r\n][ \t\r\n]+" " " IP_HLS_FLAGS "${IP_HLS_FLAGS}")
   string(STRIP "${IP_HLS_FLAGS}" IP_HLS_FLAGS)
-
-  # Recover the part name used by the given platform
-  if(NOT IP_PLATFORM_PART)
-    hlslib_get_part_by_platform(IP_PLATFORM_PART ${IP_PLATFORM})
-  endif()
 
   set(IP_PROJECT_BUILD_DIR ${CMAKE_CURRENT_BINARY_DIR}/${IP_NAME}/${IP_PLATFORM_PART})
 
@@ -404,7 +395,7 @@ function(add_vitis_ip
                     DEPENDS ${IP_NAME} ${IP_DEPENDS})
   add_custom_command(OUTPUT ${IP_IP_DIR}/${IP_NAME}/component.xml 
                     COMMENT "Extracting IP for ${IP_NAME}."
-                    COMMAND unzip -qo ${IP_IP_DIR}/${IP_NAME}.zip -d ${IP_IP_DIR}/${IP_NAME}
+                    COMMAND rm -rf ${IP_IP_DIR}/${IP_NAME} && unzip -qo ${IP_IP_DIR}/${IP_NAME}.zip -d ${IP_IP_DIR}/${IP_NAME}
                     DEPENDS ${IP_IP_DIR}/${IP_NAME}.zip)
   add_custom_target(ip.${IP_NAME} DEPENDS
                     synth.${IP_NAME}
