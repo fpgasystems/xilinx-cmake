@@ -258,6 +258,21 @@ ${TCL_CMD}\
 exit")
 endfunction()
 
+# Function to write ip TCL scripts
+function (write_rtl_kernel_export_script)
+  set(oneValueArgs DESTINATION PACKAGE_TCL_PATH XO_PATH KERNEL_NAME PACKAGED_PATH XML_PATH)
+  cmake_parse_arguments(TCL "" "${oneValueArgs}" "${multiValueArgs}" ${ARGN})
+
+  if(TCL_XML_PATH)
+    set(TCL_XML_PATH "-kernel_xml ${TCL_XML_PATH}")
+  endif()
+
+  file(WRITE ${TCL_DESTINATION}
+    "\
+source -notrace ${TCL_PACKAGE_TCL_PATH}\ 
+package_xo -xo_path ${TCL_XO_PATH} -kernel_name ${TCL_KERNEL_NAME} -force -ip_directory ${TCL_PACKAGED_PATH} ${TCL_XML_PATH}")
+endfunction()
+
 # Used for building IPs that can be later used by kernels
 function(add_vitis_ip
          IP_TARGET)
@@ -442,6 +457,150 @@ function(add_vitis_ip
 
 endfunction()
 
+# Used for building RTL kernels
+function(add_vivado_kernel
+        KERNEL_TARGET)
+
+  # Keyword arguments
+  cmake_parse_arguments(
+      KERNEL
+      ""
+      "KERNEL;PACKAGE_TCL_PATH;IP_REPO;XML_PATH"
+      "FILES;COMPUTE_UNITS;IPS;DEPENDS;INCLUDE_DIRS;HLS_FLAGS;HLS_CONFIG;COMPILE_FLAGS;PORT_MAPPING;SLR_MAPPING"
+      ${ARGN})
+
+  # Verify that input is sane
+  if(NOT KERNEL_FILES)
+    message(FATAL_ERROR "Must pass kernel file(s) to add_vitis_kernel using the FILES keyword.")
+  endif()
+  hlslib_make_paths_absolute(KERNEL_FILES ${KERNEL_FILES})
+
+  if(NOT KERNEL_PACKAGE_TCL_PATH)
+    message(FATAL_ERROR "Must pass kernel package.tcl to add_vivado_kernel using the PACKAGE_TCL_PATH keyword.")
+  endif()
+  hlslib_make_paths_absolute(KERNEL_PACKAGE_TCL_PATH ${KERNEL_PACKAGE_TCL_PATH})
+
+  if(KERNEL_XML_PATH)
+    hlslib_make_paths_absolute(KERNEL_XML_PATH ${KERNEL_XML_PATH})
+  endif()
+
+  # Convert non-target dependencies to absolute paths
+  string(REPLACE " " ";" KERNEL_DEPENDS "${KERNEL_DEPENDS}")
+  unset(_KERNEL_DEPENDS)
+  foreach(DEP ${KERNEL_DEPENDS})
+    if(NOT TARGET ${DEP}) 
+      hlslib_make_paths_absolute(DEP ${DEP})
+    endif()
+    set(_KERNEL_DEPENDS ${_KERNEL_DEPENDS} ${DEP})
+  endforeach()
+  set(KERNEL_DEPENDS ${KERNEL_FILES} ${KERNEL_PACKAGE_TCL_PATH} ${_KERNEL_DEPENDS})
+
+  # Create the target that will carry properties. Adding the depends here does not actually work, so we have to store
+  # them as a property, retrieve them later, and add them manually to each target
+  add_custom_target(${KERNEL_TARGET} DEPENDS ${KERNEL_DEPENDS})
+
+  # Use the target name as the kernel name if the kernel name hasn't been
+  # explicitly passed
+  if(DEFINED KERNEL_KERNEL)
+    set(KERNEL_NAME ${KERNEL_KERNEL})
+  else()
+    set(KERNEL_NAME ${KERNEL_TARGET})
+  endif()
+
+  # Default the number of compute units
+  if(NOT KERNEL_COMPUTE_UNITS)
+    set(KERNEL_COMPUTE_UNITS 1)
+  endif()
+  if(${KERNEL_COMPUTE_UNITS} GREATER 1)
+    set(KERNEL_LINK_FLAGS "${KERNEL_LINK_FLAGS} --connectivity.nk ${KERNEL_NAME}:${KERNEL_COMPUTE_UNITS}")
+  endif()
+
+  # Specify port mapping
+  string(REPLACE " " ";" KERNEL_PORT_MAPPING "${KERNEL_PORT_MAPPING}")
+  foreach(MAPPING ${KERNEL_PORT_MAPPING})
+    string(REGEX MATCH "[A-Za-z0-9_]+\\.[^: \t\n]+:[^: \t\n]+" HAS_KERNEL_NAME ${MAPPING})
+    if(HAS_KERNEL_NAME)
+      set(KERNEL_LINK_FLAGS "${KERNEL_LINK_FLAGS} --connectivity.sp ${MAPPING}") 
+    else()
+      string(REGEX MATCH "[^: \t\n]+:[^: \t\n]+" IS_MEMORY_BANK ${MAPPING})
+      if(IS_MEMORY_BANK)
+        set(KERNEL_LINK_FLAGS "${KERNEL_LINK_FLAGS} --connectivity.sp ${KERNEL_NAME}_1.${MAPPING}") 
+      else()
+        message(FATAL_ERROR "Unrecognized port mapping \"${MAPPING}\".")
+      endif()
+    endif()
+  endforeach()
+
+  # Specify SLR mapping
+  string(REPLACE " " ";" KERNEL_SLR_MAPPING "${KERNEL_SLR_MAPPING}")
+  foreach(MAPPING ${KERNEL_SLR_MAPPING})
+    string(REGEX MATCH "[A-Za-z0-9_]+:[^: \t\n]+" HAS_KERNEL_NAME ${MAPPING})
+    if(HAS_KERNEL_NAME)
+      set(KERNEL_LINK_FLAGS "${KERNEL_LINK_FLAGS} --connectivity.slr ${MAPPING}") 
+    else()
+      set(KERNEL_LINK_FLAGS "${KERNEL_LINK_FLAGS} --connectivity.slr ${KERNEL_NAME}_1:${MAPPING}") 
+    endif()
+  endforeach()
+
+  # HLS flags
+  string(FIND "${KERNEL_HLS_FLAGS}" "-std=" FOUND)
+  if(FOUND EQUAL -1)
+    set(KERNEL_HLS_FLAGS "${KERNEL_HLS_FLAGS} -std=c++11")
+  endif()
+
+  # Add additional include directories specified
+  string(REPLACE " " ";" KERNEL_INCLUDE_DIRS "${KERNEL_INCLUDE_DIRS}")
+  hlslib_make_paths_absolute(KERNEL_INCLUDE_DIRS ${KERNEL_INCLUDE_DIRS})
+  foreach(INCLUDE_DIR ${KERNEL_INCLUDE_DIRS})
+    set(KERNEL_HLS_FLAGS "${KERNEL_HLS_FLAGS} -I${INCLUDE_DIR}")
+  endforeach()
+
+  # Clean up HLS flags to make sure they use string syntax (not list syntax),
+  # and that there are no superfluous spaces.
+  string(REGEX REPLACE ";|[ \t\r\n][ \t\r\n]+" " " KERNEL_HLS_FLAGS "${KERNEL_HLS_FLAGS}")
+  string(STRIP "${KERNEL_HLS_FLAGS}" KERNEL_HLS_FLAGS)
+
+  # Create IP dependencies
+  string(REPLACE " " ";" KERNEL_IPS "${KERNEL_IPS}")
+  unset(_KERNEL_IPS)
+  foreach(DEP ${KERNEL_IPS})
+    if(NOT TARGET ip.${DEP})
+      message(FATAL_ERROR "Must pass kernel IPs created with add_vitis_ip to add_vivado_kernel using the IPS keyword.")
+    endif()
+    set(_KERNEL_IPS ${_KERNEL_IPS} ip.${DEP})
+  endforeach()
+  set(KERNEL_DEPENDS ${KERNEL_DEPENDS} ${_KERNEL_IPS})
+  
+  # export xo target
+  set(KERNEL_XO_PATH ${KERNEL_IP_REPO}/${KERNEL_NAME}.xo)
+  write_rtl_kernel_export_script(
+    DESTINATION ${CMAKE_CURRENT_BINARY_DIR}/${KERNEL_NAME}_gen_xo.tcl
+    PACKAGE_TCL_PATH ${KERNEL_PACKAGE_TCL_PATH}
+    PACKAGED_PATH ${CMAKE_CURRENT_BINARY_DIR}/packaged_kernel_${KERNEL_NAME}
+    XO_PATH ${KERNEL_XO_PATH}
+    KERNEL_NAME ${KERNEL_NAME}
+    XML_PATH ${KERNEL_XML_PATH}
+  )
+  add_custom_command(OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/${KERNEL_NAME}.xo
+                     COMMENT "Exporting kernel .xo ${KERNEL_NAME}"
+                     COMMAND ${Vitis_VIVADO} -mode batch -source ${CMAKE_CURRENT_BINARY_DIR}/${KERNEL_NAME}_gen_xo.tcl
+                     DEPENDS ${KERNEL_DEPENDS})
+  add_custom_target(kernel.${KERNEL_NAME} DEPENDS
+                    ${CMAKE_CURRENT_BINARY_DIR}/${KERNEL_NAME}.xo)
+  set(KERNEL_DEPENDS ${KERNEL_DEPENDS} ${CMAKE_CURRENT_BINARY_DIR}/${KERNEL_NAME}.xo)
+
+  # Pass variables the program target through properties
+  set_target_properties(${KERNEL_TARGET} PROPERTIES KERNEL_FILES "${KERNEL_FILES}")
+  set_target_properties(${KERNEL_TARGET} PROPERTIES KERNEL_COMPUTE_UNITS "${KERNEL_COMPUTE_UNITS}")
+  set_target_properties(${KERNEL_TARGET} PROPERTIES KERNEL_NAME "${KERNEL_NAME}")
+  set_target_properties(${KERNEL_TARGET} PROPERTIES HLS_FLAGS "${KERNEL_HLS_FLAGS}")
+  set_target_properties(${KERNEL_TARGET} PROPERTIES COMPILE_FLAGS "${KERNEL_COMPILE_FLAGS}")
+  set_target_properties(${KERNEL_TARGET} PROPERTIES LINK_FLAGS "${KERNEL_LINK_FLAGS}")
+  set_target_properties(${KERNEL_TARGET} PROPERTIES HLS_CONFIG "${KERNEL_HLS_CONFIG}")
+  set_target_properties(${KERNEL_TARGET} PROPERTIES DEPENDS "${KERNEL_DEPENDS}")
+
+endfunction()
+
 # The name of the kernel is expected to match the target name. If it does not,
 # the kernel name can be passed separately with the KERNEL keyword.
 function(add_vitis_kernel
@@ -452,7 +611,7 @@ function(add_vitis_kernel
       KERNEL
       ""
       "KERNEL"
-      "FILES;COMPUTE_UNITS;IPS;DEPENDS;INCLUDE_DIRS;HLS_FLAGS;HLS_CONFIG;COMPILE_FLAGS;PORT_MAPPING;SLR_MAPPING"
+      "FILES;COMPUTE_UNITS;DEPENDS;INCLUDE_DIRS;HLS_FLAGS;HLS_CONFIG;COMPILE_FLAGS;PORT_MAPPING;SLR_MAPPING"
       ${ARGN})
 
   # Verify that input is sane
