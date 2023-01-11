@@ -11,7 +11,8 @@
 #   Vitis_VERSION - Version of Vitis installation.
 #   Vitis_VERSION_MAJOR - Major version of Vitis installation.
 #   Vitis_VERSION_MINOR - Minor version of Vitis installation.
-#   Vitis_PLATFORMINFO - Path to the utility for extracting information from installed platforms
+#   Vitis_PLATFORMINFO - Path to the utility for extracting information from installed platforms.
+#   Vitis_IP_REPO_DIR - Path to the IP repository directory for Vivado.
 #
 # To specify the location of Vitis, or to force this script to use a specific version, set the variable VITIS_ROOT to
 # the root directory of the desired Vitis installation. Similarly, XRT_ROOT can be used to specify the XRT installation
@@ -78,6 +79,8 @@ else()
   set(VITIS_USE_XRT FALSE)
 endif()
 set(Vitis_USE_XRT ${VITIS_USE_XRT} CACHE STRING "Use XRT as runtime. Otherwise, use Vitis OpenCL runtime." FORCE)
+
+set(Vitis_IP_REPO_DIR ${CMAKE_BINARY_DIR}/ip_repo CACHE STRING "Path to the IP repository directory for Vivado." FORCE)
 
 # Currently only x86 support
 if(CMAKE_SYSTEM_PROCESSOR MATCHES "(x86)|(X86)|(amd64)|(AMD64)")
@@ -281,7 +284,7 @@ function(add_vitis_ip
   cmake_parse_arguments(
       IP
       ""
-      "IP;VERSION;VENDOR;IP_DIR;PLATFORM_PART"
+      "IP;VERSION;VENDOR;PLATFORM_PART"
       "FILES;TB_FILES;DEPENDS;INCLUDE_DIRS;HLS_FLAGS;HLS_CONFIG;COMPILE_FLAGS;DISPLAY_NAME;DESCRIPTION"
       ${ARGN})
 
@@ -399,22 +402,22 @@ function(add_vitis_ip
   -vendor \"${IP_VENDOR}\" \
   -ipname \"${IP_NAME}\" \
   -version \"${IP_VERSION}\" \
-  -output \"${IP_IP_DIR}/${IP_NAME}.zip\""
+  -output \"${Vitis_IP_REPO_DIR}/${IP_NAME}.zip\""
     HLS_FLAGS ${IP_HLS_FLAGS}
     HW_FILES ${IP_FILES}
     TB_FILES ${IP_TB_FILES}
   )
-  add_custom_command(OUTPUT ${IP_IP_DIR}/${IP_NAME}.zip
+  add_custom_command(OUTPUT ${Vitis_IP_REPO_DIR}/${IP_NAME}.zip
                     COMMENT "Exporting design for ${IP_NAME}."
                     COMMAND ${Vitis_HLS} -f ${CMAKE_CURRENT_BINARY_DIR}/${IP_NAME}_ip.tcl
                     DEPENDS ${IP_NAME} ${IP_DEPENDS})
-  add_custom_command(OUTPUT ${IP_IP_DIR}/${IP_NAME}/component.xml 
+  add_custom_command(OUTPUT ${Vitis_IP_REPO_DIR}/${IP_NAME}/component.xml 
                     COMMENT "Extracting IP for ${IP_NAME}."
-                    COMMAND rm -rf ${IP_IP_DIR}/${IP_NAME} && unzip -qo ${IP_IP_DIR}/${IP_NAME}.zip -d ${IP_IP_DIR}/${IP_NAME}
-                    DEPENDS ${IP_IP_DIR}/${IP_NAME}.zip)
+                    COMMAND rm -rf ${Vitis_IP_REPO_DIR}/${IP_NAME} && unzip -qo ${Vitis_IP_REPO_DIR}/${IP_NAME}.zip -d ${Vitis_IP_REPO_DIR}/${IP_NAME}
+                    DEPENDS ${Vitis_IP_REPO_DIR}/${IP_NAME}.zip)
   add_custom_target(ip.${IP_NAME} DEPENDS
                     synth.${IP_NAME}
-                    ${IP_IP_DIR}/${IP_NAME}/component.xml)
+                    ${Vitis_IP_REPO_DIR}/${IP_NAME}/component.xml)
   set_property(TARGET ip.${IP_NAME} APPEND PROPERTY ADDITIONAL_CLEAN_FILES
               ${IP_PROJECT_BUILD_DIR}/syn vitis_hls.log)
 
@@ -465,7 +468,7 @@ function(add_vivado_kernel
   cmake_parse_arguments(
       KERNEL
       ""
-      "KERNEL;PACKAGE_TCL_PATH;IP_REPO;XML_PATH"
+      "KERNEL;PACKAGE_TCL_PATH;XML_PATH"
       "FILES;COMPUTE_UNITS;IPS;DEPENDS;INCLUDE_DIRS;HLS_FLAGS;HLS_CONFIG;COMPILE_FLAGS;PORT_MAPPING;SLR_MAPPING"
       ${ARGN})
 
@@ -493,7 +496,7 @@ function(add_vivado_kernel
     endif()
     set(_KERNEL_DEPENDS ${_KERNEL_DEPENDS} ${DEP})
   endforeach()
-  set(KERNEL_DEPENDS ${KERNEL_FILES} ${KERNEL_PACKAGE_TCL_PATH} ${_KERNEL_DEPENDS})
+  set(KERNEL_DEPENDS ${KERNEL_FILES} ${KERNEL_PACKAGE_TCL_PATH} ${KERNEL_XML_PATH} ${_KERNEL_DEPENDS})
 
   # Create the target that will carry properties. Adding the depends here does not actually work, so we have to store
   # them as a property, retrieve them later, and add them manually to each target
@@ -572,7 +575,7 @@ function(add_vivado_kernel
   set(KERNEL_DEPENDS ${KERNEL_DEPENDS} ${_KERNEL_IPS})
   
   # export xo target
-  set(KERNEL_XO_PATH ${KERNEL_IP_REPO}/${KERNEL_NAME}.xo)
+  set(KERNEL_XO_PATH ${CMAKE_BINARY_DIR}/${KERNEL_NAME}.xo)
   write_rtl_kernel_export_script(
     DESTINATION ${CMAKE_CURRENT_BINARY_DIR}/${KERNEL_NAME}_gen_xo.tcl
     PACKAGE_TCL_PATH ${KERNEL_PACKAGE_TCL_PATH}
@@ -581,13 +584,13 @@ function(add_vivado_kernel
     KERNEL_NAME ${KERNEL_NAME}
     XML_PATH ${KERNEL_XML_PATH}
   )
-  add_custom_command(OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/${KERNEL_NAME}.xo
+  add_custom_command(OUTPUT ${KERNEL_XO_PATH}
                      COMMENT "Exporting kernel .xo ${KERNEL_NAME}"
                      COMMAND ${Vitis_VIVADO} -mode batch -source ${CMAKE_CURRENT_BINARY_DIR}/${KERNEL_NAME}_gen_xo.tcl
                      DEPENDS ${KERNEL_DEPENDS})
   add_custom_target(kernel.${KERNEL_NAME} DEPENDS
-                    ${CMAKE_CURRENT_BINARY_DIR}/${KERNEL_NAME}.xo)
-  set(KERNEL_DEPENDS ${KERNEL_DEPENDS} ${CMAKE_CURRENT_BINARY_DIR}/${KERNEL_NAME}.xo)
+                    ${KERNEL_XO_PATH})
+  set(KERNEL_DEPENDS ${KERNEL_DEPENDS} ${KERNEL_XO_PATH})
 
   # Pass variables the program target through properties
   set_target_properties(${KERNEL_TARGET} PROPERTIES KERNEL_FILES "${KERNEL_FILES}")
@@ -1106,7 +1109,8 @@ set(Vitis_EXPORTS
     Vitis_VERSION
     Vitis_MAJOR_VERSION
     Vitis_MINOR_VERSION
-    Vitis_PLATFORMINFO)
+    Vitis_PLATFORMINFO
+    Vitis_IP_REPO_DIR)
 mark_as_advanced(Vitis_EXPORTS)
 
 # include(FindPackageHandleStandardArgs)
