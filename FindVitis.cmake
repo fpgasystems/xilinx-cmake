@@ -474,7 +474,7 @@ function(add_vivado_kernel
 
   # Verify that input is sane
   if(NOT KERNEL_FILES)
-    message(FATAL_ERROR "Must pass kernel file(s) to add_vitis_kernel using the FILES keyword.")
+    message(FATAL_ERROR "Must pass kernel file(s) to add_vivado_kernel using the FILES keyword.")
   endif()
   hlslib_make_paths_absolute(KERNEL_FILES ${KERNEL_FILES})
 
@@ -764,7 +764,7 @@ function(add_vitis_program
   endif()
   foreach(KERNEL ${PROGRAM_KERNELS})
     if(NOT TARGET ${KERNEL})
-      message(FATAL_ERROR "${KERNEL} is not a valid Vitis kernel. Kernels must have been created with the add_vitis_kernel function.")
+      message(FATAL_ERROR "${KERNEL} is not a valid Vitis kernel. Kernels must have been created with the add_vitis_kernel or add_vivado_kernel functions.")
     endif()
   endforeach()
 
