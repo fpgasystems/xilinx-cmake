@@ -1,6 +1,6 @@
 # xilinx-cmake
 
-This project is entirely based on [github.com/definelicht/hlslib](https://github.com/definelicht/hlslib), with a *single additional feature*. Please refer to the original repository for more information about documentation, support, contributing, etc.
+This project is entirely based on [github.com/definelicht/hlslib](https://github.com/definelicht/hlslib). Please refer to the original repository for more information about documentation, support, contributing, etc.
 
 # Feature overview
 
@@ -35,4 +35,10 @@ make ip # Export IP (export_design)
 
 # Projects using xilinx-cmake
 
- * [fpga-network-stack](https://github.com/fpgasystems/fpga-network-stack)
+ * [github.com/fpgasystems/strega](https://github.com/fpgasystems/strega) - Strega: An HTTP Server for FPGAs
+ * [github.com/fpgasystems/Vitis_with_100Gbps_TCP-IP](https://github.com/fpgasystems/Vitis_with_100Gbps_TCP-IP) - Vitis TCP/IP stack
+ * [github.com/fpgasystems/fpga-network-stack](https://github.com/fpgasystems/fpga-network-stack) - FPGA Network stack
+
+## License
+
+This software is copyrighted under the BSD 3-Clause License.
